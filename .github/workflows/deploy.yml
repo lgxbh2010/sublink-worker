@@ -11,12 +11,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-      
+
       - name: Refresh Cloudflare Token
         run: |
           RESPONSE=$(curl -s -X POST "https://dash.cloudflare.com/oauth2/token" \
@@ -27,19 +27,19 @@ jobs:
           TOKEN=$(echo "$RESPONSE" | jq -r '.access_token')
           if [ "$TOKEN" = "null" ] || [ -z "$TOKEN" ]; then
             echo "::error::Failed to refresh Cloudflare token. Response: $RESPONSE"
-            echo "::error::Run npx wrangler login locally and update CLOUDFLARE_REFRESH_TOKEN secret."
+            echo "::error::Run 'npx wrangler login' locally and update CLOUDFLARE_REFRESH_TOKEN secret."
             exit 1
           fi
           EXPIRES_IN=$(echo "$RESPONSE" | jq -r '.expires_in')
           echo "Token refreshed successfully (expires in $EXPIRES_IN seconds)"
           echo "CLOUDFLARE_API_TOKEN=$TOKEN" >> $GITHUB_ENV
-      
+
       - name: Install dependencies
         run: npm install
-      
+
       - name: Install wrangler
         run: npm install -g wrangler
-      
+
       - name: Check and Create KV Namespace
         env:
           CLOUDFLARE_API_TOKEN: ${{ env.CLOUDFLARE_API_TOKEN }}
@@ -51,40 +51,44 @@ jobs:
             echo "Error getting KV namespace list: $LIST_OUTPUT"
             exit 1
           fi
-          
+
           LIST_OUTPUT=$(echo "$LIST_OUTPUT" | grep -v "Cloudflare collects" | grep -v "telemetry")
-          
+
           if ! echo "$LIST_OUTPUT" | jq empty; then
             echo "Invalid JSON output from wrangler"
             exit 1
           fi
-          
-          KV_ID=$(echo "$LIST_OUTPUT" | jq -r '.[] | select(.title == "sublink-worker-'$KV_ID'") | .id')
-          
+
+          KV_ID=$(echo "$LIST_OUTPUT" | jq -r ".[] | select(.title == \"sublink-worker-$KV_NAMESPACE\") | .id")
+
           if [ -z "$KV_ID" ]; then
               echo "KV namespace $KV_NAMESPACE does not exist. Creating..."
               CREATE_OUTPUT=$(wrangler kv namespace create "sublink-worker-$KV_NAMESPACE" 2>&1)
+              echo "Create KV namespace output: $CREATE_OUTPUT"
               KV_ID=$(echo "$CREATE_OUTPUT" | grep -o '[0-9a-f]\{32\}')
+
               if [ -z "$KV_ID" ]; then
                   echo "Failed to extract KV ID. Full output: $CREATE_OUTPUT"
                   exit 1
               fi
-              echo "KV namespace created with ID: $KV_ID"
+
+              echo "KV namespace $KV_NAMESPACE created successfully with ID: $KV_ID"
           else
-              echo "KV namespace exists with ID: $KV_ID"
+              echo "KV namespace $KV_NAMESPACE already exists with ID: $KV_ID"
           fi
           echo "KV_ID=$KV_ID" >> $GITHUB_ENV
-          
+
       - name: Update wrangler.toml
         run: |
           WRANGLER_CONTENT=$(cat wrangler.toml)
-          UPDATED_CONTENT=$(echo "$WRANGLER_CONTENT" | sed 's/id = "[^"]*"/id = ""/')
+          UPDATED_CONTENT=$(echo "$WRANGLER_CONTENT" | sed "s/id = \"[^\"]*\"/id = \"$KV_ID\"/")
           echo "$UPDATED_CONTENT" > wrangler.toml
-          
+          echo "Updated wrangler.toml content:"
+          cat wrangler.toml
+
       - name: Deploy to Cloudflare Workers
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ env.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
           command: deploy
-
